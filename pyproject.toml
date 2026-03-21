@@ -1,11 +1,12 @@
 [project]
 name = "ai-recipes-generator"
-version = "0.1.0"
-description = "AI Recipes Generator with love"
+version = "0.3.0"
+description = "AI Advent With Love"
 requires-python = ">=3.14"
 dependencies = [
-    "black>=26.3.1",
-    "litellm",
-    "python-dotenv",
-    "ruff>=0.15.6",
+    "black==26.3.1",
+    "litellm==1.82.2",
+    "python-dotenv==1.2.2",
+    "ruff==0.15.6",
+    "streamlit==1.55.0",
 ]

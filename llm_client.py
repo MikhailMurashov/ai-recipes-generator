@@ -13,7 +13,7 @@ def chat(
     frequency_penalty=None,
     stop=None,
 ) -> str:
-    """Генерирует рецепт на основе списка ингредиентов.
+    """Простой чат с lmm.
 
     Args:
         messages: Список сообщений в контексте с ролью.
