@@ -1,13 +1,15 @@
 import streamlit as st
-from llm_client import chat
+from agent import Agent
 from config import MODELS
 
 
 def init_session_state():
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    if "agent" not in st.session_state:
+        st.session_state.agent = Agent(system_prompt=st.session_state.get("system_prompt", ""))
     if "system_prompt" not in st.session_state:
         st.session_state.system_prompt = ""
+    if "message_stats" not in st.session_state:
+        st.session_state.message_stats = []
 
 
 def render_sidebar() -> tuple[dict, str]:
@@ -80,10 +82,11 @@ def render_sidebar() -> tuple[dict, str]:
         st.divider()
 
         if st.button("Сбросить контекст", type="secondary", use_container_width=True):
-            st.session_state.messages = []
+            st.session_state.agent = Agent(system_prompt=st.session_state.system_prompt)
+            st.session_state.message_stats = []
             st.rerun()
 
-        n = len(st.session_state.messages)
+        n = len(st.session_state.agent.history)
         st.caption(f"Сообщений: {n}")
 
     return params, selected_model
@@ -106,13 +109,15 @@ def _stats_caption(
 
 
 def render_chat_history():
-    for msg in st.session_state.messages:
-        role = msg["role"]
-        with st.chat_message(role):
+    stats_list = st.session_state.message_stats
+    assistant_idx = 0
+    for msg in st.session_state.agent.history:
+        with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if role == "assistant" and msg.get("stats"):
-                s = msg["stats"]
+            if msg["role"] == "assistant" and assistant_idx < len(stats_list):
+                s = stats_list[assistant_idx]
                 st.caption(_stats_caption(s["elapsed_s"], s["prompt_tokens"], s["completion_tokens"], s["total_tokens"]))
+                assistant_idx += 1
 
 
 def handle_input(params: dict, model: str):
@@ -120,21 +125,17 @@ def handle_input(params: dict, model: str):
     if not user_input:
         return
 
-    st.session_state.messages.append({"role": "user", "content": user_input})
-
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    call_messages = [
-        {"role": "system", "content": st.session_state.system_prompt}
-    ] + [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+    st.session_state.agent.system_prompt = st.session_state.system_prompt
 
     active_params = {k: v for k, v in params.items() if v is not None}
-    print(f"[chat] model={model}, params={active_params}, messages={len(call_messages)}")
+    print(f"[agent] model={model}, params={active_params}")
 
     with st.chat_message("assistant"):
         with st.spinner("Думаю..."):
-            result = chat(call_messages, model=model, **params)
+            result = st.session_state.agent.run(user_input, model=model, **active_params)
         st.markdown(result.content)
         stats = {
             "elapsed_s": result.elapsed_s,
@@ -142,9 +143,8 @@ def handle_input(params: dict, model: str):
             "completion_tokens": result.completion_tokens,
             "total_tokens": result.total_tokens,
         }
+        st.session_state.message_stats.append(stats)
         st.caption(_stats_caption(result.elapsed_s, result.prompt_tokens, result.completion_tokens, result.total_tokens))
-
-    st.session_state.messages.append({"role": "assistant", "content": result.content, "stats": stats})
 
 
 def main():

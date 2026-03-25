@@ -65,9 +65,10 @@ def chat(
     """
 
     t0 = time.time()
+    is_gigachat = model.startswith("gigachat/")
     response = litellm.completion(
         model=model,
-        api_key=API_KEY,
+        api_key=None if is_gigachat else API_KEY,
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
@@ -77,6 +78,7 @@ def chat(
         frequency_penalty=frequency_penalty,
         stop=stop,
         messages=messages,
+        **({"ssl_verify": False} if is_gigachat else {}),
     )
     elapsed_s = time.time() - t0
 
