@@ -71,6 +71,10 @@ class SlidingWindowSummaryStrategy(BaseStrategy):
     def summary(self) -> str:
         return self._summary
 
+    @property
+    def summarized_count(self) -> int:
+        return self._summarized_count
+
     def run(self, user_input: str, **llm_params):
         self._history.append({"role": "user", "content": user_input})
         response = chat(self._build_messages(), **llm_params)
@@ -178,62 +182,64 @@ class StickyFactsStrategy(BaseStrategy):
     def __init__(self, system_prompt: str = "", window_size: int = 6) -> None:
         super().__init__(system_prompt)
         self._window_size: int = window_size
-        self._facts: dict[str, str] = {}
+        self._facts: str = ""
 
     @property
-    def facts(self) -> dict[str, str]:
-        return dict(self._facts)
+    def facts(self) -> str:
+        return self._facts
 
     def run(self, user_input: str, **llm_params):
         self._history.append({"role": "user", "content": user_input})
         response = chat(self._build_messages(), **llm_params)
         self._history.append({"role": "assistant", "content": response.content})
         self._accumulate_tokens(response)
-        self._extract_facts(user_input, response.content, llm_params.get("model"))
+        if len(self._history) > self._window_size:
+            self._merge_facts(llm_params.get("model"))
         return response
 
-    def _extract_facts(
-        self, user_input: str, assistant_reply: str, model: str | None
-    ) -> None:
-        prompt = (
-            "Извлеки ключевые факты из диалога ниже. Верни в формате TOON (по одному факту в строке):\n"
-            "ключ: значение\n"
-            "ключ: значение\n\n"
-            "Если новых фактов нет, верни пустой ответ. Отвечай ТОЛЬКО фактами, без пояснений.\n\n"
-            f"Пользователь: {user_input}\n"
-            f"Ассистент: {assistant_reply}"
-        )
+    def _merge_facts(self, model: str | None) -> None:
+        new_msgs = self._history[: -self._window_size]
+        if not new_msgs:
+            return
+        convo_text = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in new_msgs)
+        if self._facts:
+            prompt = (
+                f"Текущие факты:\n{self._facts}\n\n"
+                f"Новые сообщения:\n{convo_text}\n\n"
+                f"Обнови список фактов: добавь новое, исправь устаревшее, убери дубли. "
+                f"Отвечай ТОЛЬКО списком фактов, каждый с новой строки, начиная с '- '. "
+                f"Включай только долгосрочно важное: имя, цели, предпочтения, ключевые договорённости."
+            )
+        else:
+            prompt = (
+                f"Сообщения:\n{convo_text}\n\n"
+                f"Извлеки ключевые факты о пользователе и контексте задачи. "
+                f"Отвечай ТОЛЬКО списком фактов, каждый с новой строки, начиная с '- '. "
+                f"Включай только долгосрочно важное: имя, цели, предпочтения, ключевые договорённости."
+            )
         try:
-            response = chat([{"role": "user", "content": prompt}], model=model)
-            extracted = self._parse_toon(response.content)
-            if extracted:
-                self._facts.update(extracted)
+            logging.info("merge_facts prompt: %s", prompt)
+            response = chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "Ты агент по ведению базы фактов о пользователе. Отвечай строго в указанном формате.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model=model,
+            )
+            logging.info("merge_facts response: %s", response.content)
+            self._facts = response.content
         except Exception as e:
-            logging.warning(f"strategies: fact extraction failed, skipping: {e}")
-
-    def _parse_toon(self, raw: str) -> dict[str, str]:
-        """Parse TOON (Token Oriented Object Notation) format: 'key: value' per line."""
-        result = {}
-        for line in raw.splitlines():
-            line = line.strip()
-            # Skip empty lines, comments, and section headers
-            if not line or line.startswith("#") or line.startswith("["):
-                continue
-            # Parse 'key: value' format
-            if ":" in line:
-                key, _, value = line.partition(":")
-                key = key.strip()
-                value = value.strip()
-                if key and value:
-                    result[key] = value
-        return result
+            logging.warning(f"strategies: fact merge failed, skipping: {e}")
 
     def _build_messages(self) -> list[dict[str, str]]:
         messages = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         if self._facts:
-            facts_text = "\n".join(f"- {k}: {v}" for k, v in self._facts.items())
+            facts_text = "\n".join(self._facts)
             messages.append(
                 {
                     "role": "system",
@@ -246,7 +252,7 @@ class StickyFactsStrategy(BaseStrategy):
     def to_state(self) -> dict:
         return {
             "window_size": self._window_size,
-            "facts": dict(self._facts),
+            "facts": self._facts,
             "history": list(self._history),
         }
 
@@ -255,7 +261,7 @@ class StickyFactsStrategy(BaseStrategy):
         instance = cls(
             system_prompt=system_prompt, window_size=state.get("window_size", 6)
         )
-        instance._facts = dict(state.get("facts", {}))
+        instance._facts = state.get("facts", "")
         instance._history = list(state.get("history", []))
         return instance
 

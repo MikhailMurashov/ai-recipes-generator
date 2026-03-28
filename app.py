@@ -6,7 +6,7 @@ from config import MODELS
 from storage import delete_context, list_contexts, new_session_id, save_context
 from strategies import StrategyType
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 
 def init_session_state():
@@ -153,11 +153,6 @@ def render_sidebar() -> tuple[dict, str]:
                 key="sf_window_size",
             )
             agent._strategy._window_size = win
-            facts = agent.facts
-            if facts:
-                with st.expander("Извлечённые факты", expanded=False):
-                    rows = "\n".join(f"| {k} | {v} |" for k, v in facts.items())
-                    st.markdown(f"| Факт | Значение |\n|---|---|\n{rows}")
 
         elif agent.strategy_type == StrategyType.BRANCHING:
             render_branch_panel(agent)
@@ -281,29 +276,88 @@ def _stats_caption(
     return " · ".join(parts)
 
 
+def _render_msg(
+    msg: dict, stats_list: list, assistant_idx: int, dimmed: bool = False
+) -> int:
+    """Render a single chat message. Returns updated assistant_idx."""
+    with st.chat_message(msg["role"]):
+        if dimmed:
+            st.markdown(
+                f'<div style="opacity:0.4">{msg["content"]}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(msg["content"])
+        if msg["role"] == "assistant" and assistant_idx < len(stats_list):
+            s = stats_list[assistant_idx]
+            delta_in = s.get("delta_prompt_tokens", s["prompt_tokens"])
+            comp = s["completion_tokens"]
+            delta_total = (
+                (delta_in or 0) + (comp or 0) if delta_in is not None else None
+            )
+            st.caption(_stats_caption(s["elapsed_s"], delta_in, comp, delta_total))
+            assistant_idx += 1
+    return assistant_idx
+
+
 def render_chat_history():
     agent = st.session_state.agent
-
-    # Show branch header when branching is active
-    if agent.strategy_type == StrategyType.BRANCHING:
-        bid = agent.active_branch_id
-        label = agent.branches[bid].name if bid else "Ствол"
-        st.caption(f"Ветка: {label}")
-
+    history = agent.history
     stats_list = st.session_state.message_stats
     assistant_idx = 0
-    for msg in agent.history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg["role"] == "assistant" and assistant_idx < len(stats_list):
-                s = stats_list[assistant_idx]
-                delta_in = s.get("delta_prompt_tokens", s["prompt_tokens"])
-                comp = s["completion_tokens"]
-                delta_total = (
-                    (delta_in or 0) + (comp or 0) if delta_in is not None else None
-                )
-                st.caption(_stats_caption(s["elapsed_s"], delta_in, comp, delta_total))
-                assistant_idx += 1
+
+    if agent.strategy_type == StrategyType.SLIDING_WINDOW_SUMMARY:
+        summarized_count = agent.summarized_count
+        # Render summarized (dimmed) messages
+        for msg in history[:summarized_count]:
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx, dimmed=True)
+        # Summary card between old and active messages
+        if agent.summary:
+            st.info(f"**Краткое содержание:**\n\n{agent.summary}")
+        # Render active messages
+        for msg in history[summarized_count:]:
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+
+    elif agent.strategy_type == StrategyType.SLIDING_WINDOW:
+        window_size = agent._strategy._window_size
+        cutoff = max(0, len(history) - window_size)
+        for msg in history[:cutoff]:
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx, dimmed=True)
+        for msg in history[cutoff:]:
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+
+    elif agent.strategy_type == StrategyType.STICKY_FACTS:
+        window_size = agent._strategy._window_size
+        cutoff = max(0, len(history) - window_size)
+        for msg in history[:cutoff]:
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx, dimmed=True)
+        facts = agent.facts
+        if facts:
+            st.info(f"**Известные факты:**\n\n{facts}")
+        for msg in history[cutoff:]:
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+
+    elif agent.strategy_type == StrategyType.BRANCHING:
+        bid = agent.active_branch_id
+        branches = agent.branches
+        if bid and bid in branches:
+            branch = branches[bid]
+            checkpoint = branch.checkpoint_index
+            for msg in history[:checkpoint]:
+                assistant_idx = _render_msg(msg, stats_list, assistant_idx, dimmed=True)
+            st.divider()
+            st.caption(f"↳ Ветка: {branch.name}")
+            for msg in history[checkpoint:]:
+                assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+        else:
+            label = "Ствол"
+            st.caption(f"Ветка: {label}")
+            for msg in history:
+                assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+
+    else:
+        for msg in history:
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
 
 
 def handle_input(params: dict, model: str):
@@ -322,7 +376,7 @@ def handle_input(params: dict, model: str):
         agent.summarization_enabled = st.session_state.get("use_summary", True)
 
     active_params = {k: v for k, v in params.items() if v is not None}
-    logging.debug(f"[agent] model={model}, params={active_params}")
+    logging.info(f"[agent] model={model}, params={active_params}")
 
     prev_prompt = (
         st.session_state.message_stats[-1]["prompt_tokens"]
@@ -334,7 +388,7 @@ def handle_input(params: dict, model: str):
         with st.spinner("Думаю..."):
             result = agent.run(user_input, model=model, **active_params)
         st.markdown(result.content)
-        delta_prompt = (result.prompt_tokens or 0) - (prev_prompt or 0)
+        delta_prompt = max(0, (result.prompt_tokens or 0) - (prev_prompt or 0))
         delta_total = delta_prompt + (result.completion_tokens or 0)
         stats = {
             "elapsed_s": result.elapsed_s,

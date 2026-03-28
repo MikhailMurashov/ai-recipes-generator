@@ -1,3 +1,5 @@
+import logging
+
 from strategies import (
     BaseStrategy,
     BranchingStrategy,
@@ -6,6 +8,8 @@ from strategies import (
     StrategyType,
     make_strategy,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Agent:
@@ -21,6 +25,11 @@ class Agent:
         self._strategy: BaseStrategy = make_strategy(
             strategy_type, system_prompt, strategy_state
         )
+        logger.info(
+            "agent: init strategy=%s restored=%s",
+            strategy_type.value,
+            strategy_state is not None,
+        )
 
     # ------------------------------------------------------------------
     # Strategy switching
@@ -28,6 +37,9 @@ class Agent:
 
     def switch_strategy(self, new_type: StrategyType) -> None:
         """Switch to a new strategy, carrying over history and system prompt."""
+        logger.info(
+            "agent: switch_strategy %s -> %s", self.strategy_type.value, new_type.value
+        )
         old_history = self._strategy.history
         old_prompt = self._strategy.system_prompt
         self._strategy = make_strategy(new_type, old_prompt, None)
@@ -92,6 +104,12 @@ class Agent:
         return ""
 
     @property
+    def summarized_count(self) -> int:
+        if isinstance(self._strategy, SlidingWindowSummaryStrategy):
+            return self._strategy.summarized_count
+        return 0
+
+    @property
     def summarization_enabled(self) -> bool:
         if isinstance(self._strategy, SlidingWindowSummaryStrategy):
             return self._strategy.summarization_enabled
@@ -146,4 +164,18 @@ class Agent:
     # ------------------------------------------------------------------
 
     def run(self, user_input: str, **llm_params):
-        return self._strategy.run(user_input, **llm_params)
+        logger.info(
+            "agent: run strategy=%s history_len=%d input=%r",
+            self.strategy_type.value,
+            len(self._strategy._history),
+            user_input[:80],
+        )
+        response = self._strategy.run(user_input, **llm_params)
+        logger.info(
+            "agent: response tokens prompt=%s completion=%s total=%s elapsed=%.2fs",
+            response.prompt_tokens,
+            response.completion_tokens,
+            response.total_tokens,
+            response.elapsed_s,
+        )
+        return response
