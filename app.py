@@ -4,6 +4,7 @@ import streamlit as st
 from agent import Agent
 from config import MODELS
 from storage import delete_context, list_contexts, new_session_id, save_context
+from strategies import StrategyType
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -16,19 +17,24 @@ def init_session_state():
             st.session_state.session_id = ctx["session_id"]
             st.session_state.system_prompt = ctx.get("system_prompt", "")
             st.session_state.selected_model_key = ctx.get("model_key")
-            st.session_state.agent = Agent(system_prompt=st.session_state.system_prompt)
-            st.session_state.agent._history = ctx.get("history", [])
-            st.session_state.agent._summary = ctx.get("summary", "")
-            st.session_state.agent._summarized_count = ctx.get("summarized_count", 0)
+
+            strategy_type = ctx.get("strategy_type", "sliding_window_summary")
+            strategy_state = ctx.get("strategy_state") or {
+                "summary": ctx.get("summary", ""),
+                "summarized_count": ctx.get("summarized_count", 0),
+                "history": ctx.get("history", []),
+            }
+            agent = Agent(
+                system_prompt=st.session_state.system_prompt,
+                strategy_type=StrategyType(strategy_type),
+                strategy_state=strategy_state,
+            )
+            st.session_state.agent = agent
             st.session_state.message_stats = ctx.get("message_stats", [])
             for s in st.session_state.message_stats:
-                st.session_state.agent.total_prompt_tokens += (
-                    s.get("prompt_tokens") or 0
-                )
-                st.session_state.agent.total_completion_tokens += (
-                    s.get("completion_tokens") or 0
-                )
-                st.session_state.agent.total_tokens += s.get("total_tokens") or 0
+                agent.total_prompt_tokens += s.get("prompt_tokens") or 0
+                agent.total_completion_tokens += s.get("completion_tokens") or 0
+                agent.total_tokens += s.get("total_tokens") or 0
         else:
             st.session_state.session_id = new_session_id()
             st.session_state.system_prompt = ""
@@ -44,9 +50,123 @@ def init_session_state():
         st.session_state.message_stats = []
 
 
+def render_branch_panel(agent: Agent):
+    """Render branch management controls for BranchingStrategy."""
+    st.subheader("Ветки")
+
+    bid = agent.active_branch_id
+    branches = agent.branches
+
+    # Trunk button
+    trunk_label = "Ствол" + (" (активен)" if bid is None else "")
+    if st.button(trunk_label, key="branch_trunk", use_container_width=True):
+        agent.switch_branch(None)
+        st.rerun()
+
+    # Branch buttons
+    for branch_id, branch in branches.items():
+        is_active = branch_id == bid
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            label = branch.name + (" (активна)" if is_active else "")
+            if st.button(
+                label, key=f"branch_switch_{branch_id}", use_container_width=True
+            ):
+                agent.switch_branch(branch_id)
+                st.rerun()
+        with col2:
+            if st.button("x", key=f"branch_del_{branch_id}"):
+                agent.delete_branch(branch_id)
+                st.rerun()
+
+    # Create new branch
+    st.divider()
+    new_name = st.text_input("Название новой ветки", key="new_branch_name")
+    if st.button("Создать ветку", use_container_width=True):
+        if new_name.strip():
+            agent.create_branch(new_name.strip())
+            st.rerun()
+        else:
+            st.warning("Введите название ветки")
+
+    # Show active label
+    if bid and bid in branches:
+        st.caption(f"Активная ветка: {branches[bid].name}")
+    else:
+        st.caption("Активная ветка: Ствол")
+
+
 def render_sidebar() -> tuple[dict, str]:
     with st.sidebar:
         st.title("Параметры модели")
+
+        # ------------------------------------------------------------------
+        # Strategy picker
+        # ------------------------------------------------------------------
+        st.subheader("Стратегия контекста")
+        strategy_labels = {
+            StrategyType.SLIDING_WINDOW_SUMMARY: "Скользящее окно + Саммари",
+            StrategyType.SLIDING_WINDOW: "Скользящее окно",
+            StrategyType.STICKY_FACTS: "Sticky Facts",
+            StrategyType.BRANCHING: "Ветвление",
+        }
+        agent = st.session_state.agent
+        options = list(strategy_labels.keys())
+        current_index = options.index(agent.strategy_type)
+        selected = st.radio(
+            "Стратегия",
+            options=options,
+            index=current_index,
+            format_func=lambda t: strategy_labels[t],
+            label_visibility="collapsed",
+        )
+        if selected != agent.strategy_type:
+            agent.switch_strategy(selected)
+            st.session_state.message_stats = []
+            st.rerun()
+
+        # Strategy-specific controls
+        if agent.strategy_type == StrategyType.SLIDING_WINDOW_SUMMARY:
+            st.checkbox("Использовать саммари", value=True, key="use_summary")
+            if agent.summary:
+                with st.expander("Саммари контекста", expanded=False):
+                    st.write(agent.summary)
+
+        elif agent.strategy_type == StrategyType.SLIDING_WINDOW:
+            win = st.number_input(
+                "Размер окна",
+                min_value=1,
+                max_value=100,
+                value=agent._strategy._window_size,
+                step=1,
+                key="sw_window_size",
+            )
+            agent._strategy._window_size = win
+
+        elif agent.strategy_type == StrategyType.STICKY_FACTS:
+            win = st.number_input(
+                "Размер окна",
+                min_value=1,
+                max_value=100,
+                value=agent._strategy._window_size,
+                step=1,
+                key="sf_window_size",
+            )
+            agent._strategy._window_size = win
+            facts = agent.facts
+            if facts:
+                with st.expander("Извлечённые факты", expanded=False):
+                    rows = "\n".join(f"| {k} | {v} |" for k, v in facts.items())
+                    st.markdown(f"| Факт | Значение |\n|---|---|\n{rows}")
+
+        elif agent.strategy_type == StrategyType.BRANCHING:
+            render_branch_panel(agent)
+
+        st.divider()
+
+        # ------------------------------------------------------------------
+        # Model selector
+        # ------------------------------------------------------------------
         model_keys = list(MODELS.keys())
         saved_key = st.session_state.get("selected_model_key")
         model_index = model_keys.index(saved_key) if saved_key in model_keys else 0
@@ -116,11 +236,8 @@ def render_sidebar() -> tuple[dict, str]:
         else:
             params["frequency_penalty"] = None
 
-        st.checkbox("Использовать саммари", value=True, key="use_summary")
-
         st.divider()
 
-        agent = st.session_state.agent
         n = len(agent.history)
         if n > 0:
             contexts = list_contexts()
@@ -132,16 +249,11 @@ def render_sidebar() -> tuple[dict, str]:
             st.caption(f"Сообщений: {n}")
             if agent.total_tokens > 0:
                 st.caption(
-                    f"Токены (всего): 📥 {agent.total_prompt_tokens} in · "
-                    f"📤 {agent.total_completion_tokens} out · Σ {agent.total_tokens}"
+                    f"Токены (всего): {agent.total_prompt_tokens} in · "
+                    f"{agent.total_completion_tokens} out · Σ {agent.total_tokens}"
                 )
         else:
             st.caption("Новый чат")
-
-        if agent.summary:
-            st.divider()
-            with st.expander("Саммари контекста", expanded=False):
-                st.write(agent.summary)
 
         if st.button("Сбросить контекст", type="secondary", use_container_width=True):
             delete_context(st.session_state.session_id)
@@ -159,20 +271,28 @@ def _stats_caption(
     completion_tokens: int | None,
     total_tokens: int | None,
 ) -> str:
-    parts = [f"⏱ {elapsed_s:.2f} с"]
+    parts = [f"{elapsed_s:.2f} с"]
     if prompt_tokens is not None:
         parts += [
-            f"📥 {prompt_tokens} in",
-            f"📤 {completion_tokens} out",
+            f"{prompt_tokens} in",
+            f"{completion_tokens} out",
             f"Σ {total_tokens}",
         ]
     return " · ".join(parts)
 
 
 def render_chat_history():
+    agent = st.session_state.agent
+
+    # Show branch header when branching is active
+    if agent.strategy_type == StrategyType.BRANCHING:
+        bid = agent.active_branch_id
+        label = agent.branches[bid].name if bid else "Ствол"
+        st.caption(f"Ветка: {label}")
+
     stats_list = st.session_state.message_stats
     assistant_idx = 0
-    for msg in st.session_state.agent.history:
+    for msg in agent.history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg["role"] == "assistant" and assistant_idx < len(stats_list):
@@ -194,10 +314,12 @@ def handle_input(params: dict, model: str):
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    st.session_state.agent.system_prompt = st.session_state.system_prompt
-    st.session_state.agent.summarization_enabled = st.session_state.get(
-        "use_summary", True
-    )
+    agent = st.session_state.agent
+    agent.system_prompt = st.session_state.system_prompt
+
+    # Route summarization toggle through proxy setter
+    if agent.strategy_type == StrategyType.SLIDING_WINDOW_SUMMARY:
+        agent.summarization_enabled = st.session_state.get("use_summary", True)
 
     active_params = {k: v for k, v in params.items() if v is not None}
     logging.debug(f"[agent] model={model}, params={active_params}")
@@ -210,9 +332,7 @@ def handle_input(params: dict, model: str):
 
     with st.chat_message("assistant"):
         with st.spinner("Думаю..."):
-            result = st.session_state.agent.run(
-                user_input, model=model, **active_params
-            )
+            result = agent.run(user_input, model=model, **active_params)
         st.markdown(result.content)
         delta_prompt = (result.prompt_tokens or 0) - (prev_prompt or 0)
         delta_total = delta_prompt + (result.completion_tokens or 0)
@@ -232,11 +352,13 @@ def handle_input(params: dict, model: str):
         save_context(
             st.session_state.session_id,
             st.session_state.system_prompt,
-            st.session_state.agent.history,
+            agent.history,
             st.session_state.message_stats,
             model_key=st.session_state.get("selected_model_key"),
-            summary=st.session_state.agent.summary,
-            summarized_count=st.session_state.agent._summarized_count,
+            summary=agent.summary,
+            summarized_count=getattr(agent._strategy, "_summarized_count", 0),
+            strategy_type=agent.strategy_type.value,
+            strategy_state=agent.get_strategy_state(),
         )
     st.rerun()
 

@@ -19,6 +19,8 @@ def save_context(
     model_key: str | None = None,
     summary: str = "",
     summarized_count: int = 0,
+    strategy_type: str = "sliding_window_summary",
+    strategy_state: dict | None = None,
 ):
     STORAGE_DIR.mkdir(exist_ok=True)
     path = STORAGE_DIR / f"{session_id}.json"
@@ -40,6 +42,8 @@ def save_context(
         "message_stats": message_stats,
         "summary": summary,
         "summarized_count": summarized_count,
+        "strategy_type": strategy_type,
+        "strategy_state": strategy_state,
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
