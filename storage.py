@@ -10,7 +10,15 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
-def save_context(session_id: str, system_prompt: str, history: list, message_stats: list, model_key: str | None = None):
+def save_context(
+    session_id: str,
+    system_prompt: str,
+    history: list,
+    message_stats: list,
+    model_key: str | None = None,
+    summary: str = "",
+    summarized_count: int = 0,
+):
     STORAGE_DIR.mkdir(exist_ok=True)
     path = STORAGE_DIR / f"{session_id}.json"
     now = datetime.now().isoformat(timespec="seconds")
@@ -29,6 +37,8 @@ def save_context(session_id: str, system_prompt: str, history: list, message_sta
         "model_key": model_key,
         "history": history,
         "message_stats": message_stats,
+        "summary": summary,
+        "summarized_count": summarized_count,
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
