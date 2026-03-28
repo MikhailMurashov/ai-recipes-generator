@@ -15,6 +15,10 @@ def init_session_state():
             st.session_state.agent = Agent(system_prompt=st.session_state.system_prompt)
             st.session_state.agent._history = ctx.get("history", [])
             st.session_state.message_stats = ctx.get("message_stats", [])
+            for s in st.session_state.message_stats:
+                st.session_state.agent.total_prompt_tokens += s.get("prompt_tokens") or 0
+                st.session_state.agent.total_completion_tokens += s.get("completion_tokens") or 0
+                st.session_state.agent.total_tokens += s.get("total_tokens") or 0
         else:
             st.session_state.session_id = new_session_id()
             st.session_state.system_prompt = ""
@@ -111,6 +115,12 @@ def render_sidebar() -> tuple[dict, str]:
                 created = ctx.get("created_at", "")[:16].replace("T", " ")
                 st.caption(f"Контекст от {created}")
             st.caption(f"Сообщений: {n}")
+            agent = st.session_state.agent
+            if agent.total_tokens > 0:
+                st.caption(
+                    f"Токены (всего): 📥 {agent.total_prompt_tokens} in · "
+                    f"📤 {agent.total_completion_tokens} out · Σ {agent.total_tokens}"
+                )
         else:
             st.caption("Новый чат")
 
@@ -133,8 +143,8 @@ def _stats_caption(
     parts = [f"⏱ {elapsed_s:.2f} с"]
     if prompt_tokens is not None:
         parts += [
-            f"📥 {prompt_tokens} пт",
-            f"📤 {completion_tokens} кт",
+            f"📥 {prompt_tokens} in",
+            f"📤 {completion_tokens} out",
             f"Σ {total_tokens}",
         ]
     return " · ".join(parts)
@@ -148,7 +158,10 @@ def render_chat_history():
             st.markdown(msg["content"])
             if msg["role"] == "assistant" and assistant_idx < len(stats_list):
                 s = stats_list[assistant_idx]
-                st.caption(_stats_caption(s["elapsed_s"], s["prompt_tokens"], s["completion_tokens"], s["total_tokens"]))
+                delta_in = s.get("delta_prompt_tokens", s["prompt_tokens"])
+                comp = s["completion_tokens"]
+                delta_total = (delta_in or 0) + (comp or 0) if delta_in is not None else None
+                st.caption(_stats_caption(s["elapsed_s"], delta_in, comp, delta_total))
                 assistant_idx += 1
 
 
@@ -165,18 +178,23 @@ def handle_input(params: dict, model: str):
     active_params = {k: v for k, v in params.items() if v is not None}
     print(f"[agent] model={model}, params={active_params}")
 
+    prev_prompt = st.session_state.message_stats[-1]["prompt_tokens"] if st.session_state.message_stats else 0
+
     with st.chat_message("assistant"):
         with st.spinner("Думаю..."):
             result = st.session_state.agent.run(user_input, model=model, **active_params)
         st.markdown(result.content)
+        delta_prompt = (result.prompt_tokens or 0) - (prev_prompt or 0)
+        delta_total = delta_prompt + (result.completion_tokens or 0)
         stats = {
             "elapsed_s": result.elapsed_s,
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
             "total_tokens": result.total_tokens,
+            "delta_prompt_tokens": delta_prompt,
         }
         st.session_state.message_stats.append(stats)
-        st.caption(_stats_caption(result.elapsed_s, result.prompt_tokens, result.completion_tokens, result.total_tokens))
+        st.caption(_stats_caption(result.elapsed_s, delta_prompt, result.completion_tokens, delta_total))
         save_context(
             st.session_state.session_id,
             st.session_state.system_prompt,
@@ -184,6 +202,7 @@ def handle_input(params: dict, model: str):
             st.session_state.message_stats,
             model_key=st.session_state.get("selected_model_key"),
         )
+    st.rerun()
 
 
 def main():
