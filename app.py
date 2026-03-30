@@ -137,7 +137,12 @@ def render_sidebar() -> tuple[dict, str]:
         wm_entries = agent.working_memory.entries
         ltm_entries = agent.long_term_memory.entries
         mem_label = f"Память · 📋{len(wm_entries)} · 💾{len(ltm_entries)}"
-        with st.expander(mem_label, expanded=False):
+        mem_open = (
+            st.session_state.pop("mem_panel_open", False)
+            if "mem_panel_open" in st.session_state
+            else False
+        )
+        with st.expander(mem_label, expanded=mem_open):
             st.caption("Сохраняйте сообщения кнопками 📋/💾 в чате.")
 
             # Краткосрочная
@@ -160,8 +165,7 @@ def render_sidebar() -> tuple[dict, str]:
             # Рабочая
             st.markdown("**Рабочая** (текущая задача)")
             if wm_entries:
-                for k, entry in wm_entries.items():
-                    st.markdown(f"*{k[:40]}*")
+                for entry in wm_entries.values():
                     st.caption(
                         entry.value[:120] + ("…" if len(entry.value) > 120 else "")
                     )
@@ -173,8 +177,7 @@ def render_sidebar() -> tuple[dict, str]:
             # Долговременная
             st.markdown("**Долговременная** (профиль, знания)")
             if ltm_entries:
-                for k, entry in ltm_entries.items():
-                    st.markdown(f"*{k[:40]}*")
+                for entry in ltm_entries.values():
                     st.caption(
                         entry.value[:120] + ("…" if len(entry.value) > 120 else "")
                     )
@@ -403,6 +406,8 @@ def _render_msg(
                             agent.working_memory.to_state(),
                         )
                         st.toast("Сохранено в рабочую память")
+                        st.session_state["mem_panel_open"] = True
+                        st.rerun()
                 with c2:
                     if st.button(
                         "💾",
@@ -412,6 +417,8 @@ def _render_msg(
                     ):
                         agent.long_term_memory.set(_memory_key(content), content)
                         st.toast("Сохранено в долговременную память")
+                        st.session_state["mem_panel_open"] = True
+                        st.rerun()
 
     return assistant_idx
 

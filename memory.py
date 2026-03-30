@@ -42,7 +42,7 @@ class WorkingMemory:
     def to_context_string(self) -> str:
         if not self._entries:
             return ""
-        return "\n".join(f"- {k}: {v.value}" for k, v in self._entries.items())
+        return "\n".join(f"- {v.value}" for v in self._entries.values())
 
     def to_state(self) -> dict:
         return {k: asdict(v) for k, v in self._entries.items()}
@@ -103,4 +103,4 @@ class LongTermMemory:
     def to_context_string(self) -> str:
         if not self._entries:
             return ""
-        return "\n".join(f"- {k}: {v.value}" for k, v in self._entries.items())
+        return "\n".join(f"- {v.value}" for v in self._entries.values())
