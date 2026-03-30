@@ -11,6 +11,19 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
+def save_working_memory(session_id: str, working_memory: dict) -> None:
+    """Update only the working_memory field in an existing session file."""
+    path = STORAGE_DIR / f"{session_id}.json"
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text())
+        data["working_memory"] = working_memory
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logging.warning(f"storage: save_working_memory: {e}")
+
+
 def save_context(
     session_id: str,
     system_prompt: str,
@@ -21,6 +34,7 @@ def save_context(
     summarized_count: int = 0,
     strategy_type: str = "sliding_window_summary",
     strategy_state: dict | None = None,
+    working_memory: dict | None = None,
 ):
     STORAGE_DIR.mkdir(exist_ok=True)
     path = STORAGE_DIR / f"{session_id}.json"
@@ -44,6 +58,7 @@ def save_context(
         "summarized_count": summarized_count,
         "strategy_type": strategy_type,
         "strategy_state": strategy_state,
+        "working_memory": working_memory or {},
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -54,7 +69,10 @@ def list_contexts() -> list[dict]:
     result = []
     for f in STORAGE_DIR.glob("*.json"):
         try:
-            result.append(json.loads(f.read_text()))
+            data = json.loads(f.read_text())
+            if "session_id" not in data:
+                continue
+            result.append(data)
         except Exception as e:
             logging.warning(f"storage: {e}")
     return sorted(result, key=lambda d: d.get("updated_at", ""), reverse=True)

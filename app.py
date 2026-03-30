@@ -1,10 +1,17 @@
+import hashlib
 import logging
 
 import streamlit as st
 from agent import Agent
 from config import MODELS
-from storage import delete_context, list_contexts, new_session_id, save_context
-from strategies import StrategyType
+from storage import (
+    delete_context,
+    list_contexts,
+    new_session_id,
+    save_context,
+    save_working_memory,
+)
+from strategies import SlidingWindowSummaryStrategy, StrategyType
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,7 +25,7 @@ def init_session_state():
             st.session_state.system_prompt = ctx.get("system_prompt", "")
             st.session_state.selected_model_key = ctx.get("model_key")
 
-            strategy_type = ctx.get("strategy_type", "sliding_window_summary")
+            strategy_type = ctx.get("strategy_type", "sliding_window")
             strategy_state = ctx.get("strategy_state") or {
                 "summary": ctx.get("summary", ""),
                 "summarized_count": ctx.get("summarized_count", 0),
@@ -28,6 +35,7 @@ def init_session_state():
                 system_prompt=st.session_state.system_prompt,
                 strategy_type=StrategyType(strategy_type),
                 strategy_state=strategy_state,
+                working_memory_state=ctx.get("working_memory", {}),
             )
             st.session_state.agent = agent
             st.session_state.message_stats = ctx.get("message_stats", [])
@@ -100,64 +108,8 @@ def render_sidebar() -> tuple[dict, str]:
     with st.sidebar:
         st.title("Параметры модели")
 
-        # ------------------------------------------------------------------
-        # Strategy picker
-        # ------------------------------------------------------------------
-        st.subheader("Стратегия контекста")
-        strategy_labels = {
-            StrategyType.SLIDING_WINDOW_SUMMARY: "Скользящее окно + Саммари",
-            StrategyType.SLIDING_WINDOW: "Скользящее окно",
-            StrategyType.STICKY_FACTS: "Sticky Facts",
-            StrategyType.BRANCHING: "Ветвление",
-        }
         agent = st.session_state.agent
-        options = list(strategy_labels.keys())
-        current_index = options.index(agent.strategy_type)
-        selected = st.radio(
-            "Стратегия",
-            options=options,
-            index=current_index,
-            format_func=lambda t: strategy_labels[t],
-            label_visibility="collapsed",
-        )
-        if selected != agent.strategy_type:
-            agent.switch_strategy(selected)
-            st.session_state.message_stats = []
-            st.rerun()
-
-        # Strategy-specific controls
-        if agent.strategy_type == StrategyType.SLIDING_WINDOW_SUMMARY:
-            st.checkbox("Использовать саммари", value=True, key="use_summary")
-            if agent.summary:
-                with st.expander("Саммари контекста", expanded=False):
-                    st.write(agent.summary)
-
-        elif agent.strategy_type == StrategyType.SLIDING_WINDOW:
-            win = st.number_input(
-                "Размер окна",
-                min_value=1,
-                max_value=100,
-                value=agent._strategy._window_size,
-                step=1,
-                key="sw_window_size",
-            )
-            agent._strategy._window_size = win
-
-        elif agent.strategy_type == StrategyType.STICKY_FACTS:
-            win = st.number_input(
-                "Размер окна",
-                min_value=1,
-                max_value=100,
-                value=agent._strategy._window_size,
-                step=1,
-                key="sf_window_size",
-            )
-            agent._strategy._window_size = win
-
-        elif agent.strategy_type == StrategyType.BRANCHING:
-            render_branch_panel(agent)
-
-        st.divider()
+        n = len(agent.history)
 
         # ------------------------------------------------------------------
         # Model selector
@@ -178,62 +130,183 @@ def render_sidebar() -> tuple[dict, str]:
             label_visibility="collapsed",
         )
 
+        # ------------------------------------------------------------------
+        # Memory panel
+        # ------------------------------------------------------------------
         st.divider()
-        st.subheader("Параметры")
+        wm_entries = agent.working_memory.entries
+        ltm_entries = agent.long_term_memory.entries
+        mem_label = f"Память · 📋{len(wm_entries)} · 💾{len(ltm_entries)}"
+        with st.expander(mem_label, expanded=False):
+            st.caption("Сохраняйте сообщения кнопками 📋/💾 в чате.")
 
+            # Краткосрочная
+            st.markdown("**Краткосрочная**")
+            window_info = ""
+            if agent.strategy_type == StrategyType.SLIDING_WINDOW_SUMMARY:
+                window_info = f"окно {SlidingWindowSummaryStrategy.CONTEXT_WINDOW}"
+                if agent.summarized_count:
+                    window_info += f", сжато {agent.summarized_count}"
+            elif hasattr(agent._strategy, "_window_size"):
+                window_info = f"окно {agent._strategy._window_size}"
+            st.caption(
+                f"{n} сообщ."
+                + (f" · {window_info}" if window_info else "")
+                + " · управляется автоматически"
+            )
+
+            st.divider()
+
+            # Рабочая
+            st.markdown("**Рабочая** (текущая задача)")
+            if wm_entries:
+                for k, entry in wm_entries.items():
+                    st.markdown(f"*{k[:40]}*")
+                    st.caption(
+                        entry.value[:120] + ("…" if len(entry.value) > 120 else "")
+                    )
+            else:
+                st.caption("Пусто — кнопка 📋 у сообщений.")
+
+            st.divider()
+
+            # Долговременная
+            st.markdown("**Долговременная** (профиль, знания)")
+            if ltm_entries:
+                for k, entry in ltm_entries.items():
+                    st.markdown(f"*{k[:40]}*")
+                    st.caption(
+                        entry.value[:120] + ("…" if len(entry.value) > 120 else "")
+                    )
+                if st.button(
+                    "Очистить долговременную",
+                    type="secondary",
+                    use_container_width=True,
+                ):
+                    agent.long_term_memory.clear()
+                    st.rerun()
+            else:
+                st.caption("Пусто — кнопка 💾 у сообщений.")
+
+        st.divider()
         params = {}
+        with st.expander("Параметры", expanded=False):
+            use_temp = st.checkbox("Температура", value=False)
+            if use_temp:
+                params["temperature"] = st.slider(
+                    "temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.05
+                )
+            else:
+                params["temperature"] = None
 
-        use_temp = st.checkbox("Температура", value=False)
-        if use_temp:
-            params["temperature"] = st.slider(
-                "temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.05
-            )
-        else:
-            params["temperature"] = None
+            use_top_p = st.checkbox("Top P", value=False)
+            if use_top_p:
+                params["top_p"] = st.slider(
+                    "top_p", min_value=0.0, max_value=1.0, value=1.0, step=0.05
+                )
+            else:
+                params["top_p"] = None
 
-        use_top_p = st.checkbox("Top P", value=False)
-        if use_top_p:
-            params["top_p"] = st.slider(
-                "top_p", min_value=0.0, max_value=1.0, value=1.0, step=0.05
-            )
-        else:
-            params["top_p"] = None
+            use_max_tokens = st.checkbox("Макс. токенов", value=False)
+            if use_max_tokens:
+                params["max_tokens"] = st.number_input(
+                    "max_tokens", min_value=1, max_value=8192, value=1000, step=100
+                )
+            else:
+                params["max_tokens"] = None
 
-        use_max_tokens = st.checkbox("Макс. токенов", value=False)
-        if use_max_tokens:
-            params["max_tokens"] = st.number_input(
-                "max_tokens", min_value=1, max_value=8192, value=1000, step=100
-            )
-        else:
-            params["max_tokens"] = None
+            use_seed = st.checkbox("Сид", value=False)
+            if use_seed:
+                params["seed"] = st.number_input(
+                    "seed", min_value=0, max_value=2**31 - 1, value=42, step=1
+                )
+            else:
+                params["seed"] = None
 
-        use_seed = st.checkbox("Сид", value=False)
-        if use_seed:
-            params["seed"] = st.number_input(
-                "seed", min_value=0, max_value=2**31 - 1, value=42, step=1
-            )
-        else:
-            params["seed"] = None
+            use_presence = st.checkbox("Штраф темы (presence)", value=False)
+            if use_presence:
+                params["presence_penalty"] = st.slider(
+                    "presence_penalty",
+                    min_value=-2.0,
+                    max_value=2.0,
+                    value=0.0,
+                    step=0.1,
+                )
+            else:
+                params["presence_penalty"] = None
 
-        use_presence = st.checkbox("Штраф темы (presence)", value=False)
-        if use_presence:
-            params["presence_penalty"] = st.slider(
-                "presence_penalty", min_value=-2.0, max_value=2.0, value=0.0, step=0.1
-            )
-        else:
-            params["presence_penalty"] = None
-
-        use_frequency = st.checkbox("Штраф слов (frequency)", value=False)
-        if use_frequency:
-            params["frequency_penalty"] = st.slider(
-                "frequency_penalty", min_value=-2.0, max_value=2.0, value=0.0, step=0.1
-            )
-        else:
-            params["frequency_penalty"] = None
+            use_frequency = st.checkbox("Штраф слов (frequency)", value=False)
+            if use_frequency:
+                params["frequency_penalty"] = st.slider(
+                    "frequency_penalty",
+                    min_value=-2.0,
+                    max_value=2.0,
+                    value=0.0,
+                    step=0.1,
+                )
+            else:
+                params["frequency_penalty"] = None
 
         st.divider()
 
-        n = len(agent.history)
+        # ------------------------------------------------------------------
+        # Strategy picker
+        # ------------------------------------------------------------------
+        strategy_labels = {
+            StrategyType.SLIDING_WINDOW: "Скользящее окно",
+            StrategyType.SLIDING_WINDOW_SUMMARY: "Скользящее окно + Саммари",
+            StrategyType.STICKY_FACTS: "Sticky Facts",
+            StrategyType.BRANCHING: "Ветвление",
+        }
+        with st.expander("Стратегия контекста", expanded=False):
+            options = list(strategy_labels.keys())
+            current_index = options.index(agent.strategy_type)
+            selected = st.radio(
+                "Стратегия",
+                options=options,
+                index=current_index,
+                format_func=lambda t: strategy_labels[t],
+                label_visibility="collapsed",
+            )
+            if selected != agent.strategy_type:
+                agent.switch_strategy(selected)
+                st.session_state.message_stats = []
+                st.rerun()
+
+            # Strategy-specific controls
+            if agent.strategy_type == StrategyType.SLIDING_WINDOW_SUMMARY:
+                st.checkbox("Использовать саммари", value=True, key="use_summary")
+                if agent.summary:
+                    with st.expander("Саммари контекста", expanded=False):
+                        st.write(agent.summary)
+
+            elif agent.strategy_type == StrategyType.SLIDING_WINDOW:
+                win = st.number_input(
+                    "Размер окна",
+                    min_value=1,
+                    max_value=999,
+                    value=agent._strategy._window_size,
+                    step=1,
+                    key="sw_window_size",
+                )
+                agent._strategy._window_size = win
+
+            elif agent.strategy_type == StrategyType.STICKY_FACTS:
+                win = st.number_input(
+                    "Размер окна",
+                    min_value=1,
+                    max_value=999,
+                    value=agent._strategy._window_size,
+                    step=1,
+                    key="sf_window_size",
+                )
+                agent._strategy._window_size = win
+
+            elif agent.strategy_type == StrategyType.BRANCHING:
+                render_branch_panel(agent)
+
+        st.divider()
+
         if n > 0:
             contexts = list_contexts()
             ctx_map = {c["session_id"]: c for c in contexts}
@@ -253,7 +326,9 @@ def render_sidebar() -> tuple[dict, str]:
         if st.button("Сбросить контекст", type="secondary", use_container_width=True):
             delete_context(st.session_state.session_id)
             st.session_state.session_id = new_session_id()
-            st.session_state.agent = Agent(system_prompt=st.session_state.system_prompt)
+            new_agent = Agent(system_prompt=st.session_state.system_prompt)
+            new_agent.long_term_memory = agent.long_term_memory
+            st.session_state.agent = new_agent
             st.session_state.message_stats = []
             st.rerun()
 
@@ -276,18 +351,31 @@ def _stats_caption(
     return " · ".join(parts)
 
 
+def _memory_key(content: str) -> str:
+    """Auto-generate a memory key from message content."""
+    cleaned = content.strip().replace("\n", " ")
+    return cleaned[:40].rstrip()
+
+
 def _render_msg(
-    msg: dict, stats_list: list, assistant_idx: int, dimmed: bool = False
+    msg: dict,
+    stats_list: list,
+    assistant_idx: int,
+    dimmed: bool = False,
+    agent: Agent | None = None,
 ) -> int:
     """Render a single chat message. Returns updated assistant_idx."""
+    content = msg["content"]
+    key_suffix = hashlib.md5(content.encode()).hexdigest()[:8]
+
     with st.chat_message(msg["role"]):
         if dimmed:
             st.markdown(
-                f'<div style="opacity:0.4">{msg["content"]}</div>',
+                f'<div style="opacity:0.4">{content}</div>',
                 unsafe_allow_html=True,
             )
         else:
-            st.markdown(msg["content"])
+            st.markdown(content)
         if msg["role"] == "assistant" and assistant_idx < len(stats_list):
             s = stats_list[assistant_idx]
             delta_in = s.get("delta_prompt_tokens", s["prompt_tokens"])
@@ -297,6 +385,34 @@ def _render_msg(
             )
             st.caption(_stats_caption(s["elapsed_s"], delta_in, comp, delta_total))
             assistant_idx += 1
+
+        if agent is not None and not dimmed:
+            btn_col, _ = st.columns([1, 6])
+            with btn_col:
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button(
+                        "📋",
+                        key=f"wm_{key_suffix}",
+                        help="Сохранить в рабочую память",
+                        use_container_width=True,
+                    ):
+                        agent.working_memory.set(_memory_key(content), content)
+                        save_working_memory(
+                            st.session_state.session_id,
+                            agent.working_memory.to_state(),
+                        )
+                        st.toast("Сохранено в рабочую память")
+                with c2:
+                    if st.button(
+                        "💾",
+                        key=f"ltm_{key_suffix}",
+                        help="Сохранить в долговременную память",
+                        use_container_width=True,
+                    ):
+                        agent.long_term_memory.set(_memory_key(content), content)
+                        st.toast("Сохранено в долговременную память")
+
     return assistant_idx
 
 
@@ -308,15 +424,12 @@ def render_chat_history():
 
     if agent.strategy_type == StrategyType.SLIDING_WINDOW_SUMMARY:
         summarized_count = agent.summarized_count
-        # Render summarized (dimmed) messages
         for msg in history[:summarized_count]:
             assistant_idx = _render_msg(msg, stats_list, assistant_idx, dimmed=True)
-        # Summary card between old and active messages
         if agent.summary:
             st.info(f"**Краткое содержание:**\n\n{agent.summary}")
-        # Render active messages
         for msg in history[summarized_count:]:
-            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx, agent=agent)
 
     elif agent.strategy_type == StrategyType.SLIDING_WINDOW:
         window_size = agent._strategy._window_size
@@ -324,7 +437,7 @@ def render_chat_history():
         for msg in history[:cutoff]:
             assistant_idx = _render_msg(msg, stats_list, assistant_idx, dimmed=True)
         for msg in history[cutoff:]:
-            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx, agent=agent)
 
     elif agent.strategy_type == StrategyType.STICKY_FACTS:
         window_size = agent._strategy._window_size
@@ -335,7 +448,7 @@ def render_chat_history():
         if facts:
             st.info(f"**Известные факты:**\n\n{facts}")
         for msg in history[cutoff:]:
-            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx, agent=agent)
 
     elif agent.strategy_type == StrategyType.BRANCHING:
         bid = agent.active_branch_id
@@ -348,16 +461,15 @@ def render_chat_history():
             st.divider()
             st.caption(f"↳ Ветка: {branch.name}")
             for msg in history[checkpoint:]:
-                assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+                assistant_idx = _render_msg(msg, stats_list, assistant_idx, agent=agent)
         else:
-            label = "Ствол"
-            st.caption(f"Ветка: {label}")
+            st.caption("Ветка: Ствол")
             for msg in history:
-                assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+                assistant_idx = _render_msg(msg, stats_list, assistant_idx, agent=agent)
 
     else:
         for msg in history:
-            assistant_idx = _render_msg(msg, stats_list, assistant_idx)
+            assistant_idx = _render_msg(msg, stats_list, assistant_idx, agent=agent)
 
 
 def handle_input(params: dict, model: str):
@@ -413,6 +525,7 @@ def handle_input(params: dict, model: str):
             summarized_count=getattr(agent._strategy, "_summarized_count", 0),
             strategy_type=agent.strategy_type.value,
             strategy_state=agent.get_strategy_state(),
+            working_memory=agent.working_memory.to_state(),
         )
     st.rerun()
 
