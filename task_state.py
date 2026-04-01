@@ -46,25 +46,13 @@ STAGE_CONTRACTS: dict[TaskStage, str] = {
     ),
 }
 
-STAGE_DEFAULT_ACTIONS: dict[TaskStage, str] = {
-    TaskStage.PLANNING: "декомпозировать код на шаги и согласовать план",
-    TaskStage.EXECUTION: "реализовать текущий шаг из плана",
-    TaskStage.VALIDATION: "проверить результат по критериям из плана",
-    TaskStage.DONE: "подвести итог рефакторинга",
-}
-
 
 @dataclass
 class TaskState:
     stage: TaskStage = TaskStage.PLANNING
     current_step: int = 0
-    expected_action: str = ""
     paused_at_stage: TaskStage | None = None
     paused_at_step: int = 0
-
-    def __post_init__(self) -> None:
-        if not self.expected_action:
-            self.expected_action = STAGE_DEFAULT_ACTIONS.get(self.stage, "")
 
     def pause(self) -> None:
         if self.stage == TaskStage.PAUSED:
@@ -88,7 +76,6 @@ class TaskState:
         if idx < len(STAGE_ORDER) - 1:
             self.stage = STAGE_ORDER[idx + 1]
             self.current_step = 0
-            self.expected_action = STAGE_DEFAULT_ACTIONS.get(self.stage, "")
 
     def to_context_string(self) -> str:
         if self.stage == TaskStage.PAUSED:
@@ -106,15 +93,12 @@ class TaskState:
 
         if contract:
             lines.append(f"Контракт этапа:\n{contract}")
-        if self.expected_action:
-            lines.append(f"Ожидаемое действие: {self.expected_action}")
         return "\n".join(lines)
 
     def to_state(self) -> dict:
         return {
             "stage": self.stage.value,
             "current_step": self.current_step,
-            "expected_action": self.expected_action,
             "paused_at_stage": (
                 self.paused_at_stage.value if self.paused_at_stage else None
             ),
@@ -124,11 +108,9 @@ class TaskState:
     @classmethod
     def from_state(cls, data: dict) -> "TaskState":
         raw = data.get("paused_at_stage")
-        # Pass expected_action explicitly so __post_init__ doesn't overwrite it
-        obj = cls.__new__(cls)
-        obj.stage = TaskStage(data.get("stage", "planning"))
-        obj.current_step = data.get("current_step", 0)
-        obj.expected_action = data.get("expected_action", "")
-        obj.paused_at_stage = TaskStage(raw) if raw else None
-        obj.paused_at_step = data.get("paused_at_step", 0)
-        return obj
+        return cls(
+            stage=TaskStage(data.get("stage", "planning")),
+            current_step=data.get("current_step", 0),
+            paused_at_stage=TaskStage(raw) if raw else None,
+            paused_at_step=data.get("paused_at_step", 0),
+        )

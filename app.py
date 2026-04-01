@@ -18,7 +18,7 @@ from storage import (
 )
 from strategies import SlidingWindowSummaryStrategy, StrategyType
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 # ---------------------------------------------------------------------------
@@ -201,17 +201,6 @@ def render_task_panel(agent: Agent) -> None:
         st.warning(
             f"Пауза — возобновить с «{ts.paused_at_stage.value}», шаг {ts.paused_at_step}"
         )
-
-    st.caption(f"Шаг: {ts.current_step}")
-
-    new_action = st.text_input(
-        "Ожидаемое действие",
-        value=ts.expected_action,
-        key="task_expected_action",
-    )
-    if new_action != ts.expected_action:
-        ts.expected_action = new_action
-        _save_task_state(agent)
 
     st.divider()
 
