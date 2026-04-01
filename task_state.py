@@ -19,6 +19,40 @@ STAGE_ORDER: list[TaskStage] = [
     TaskStage.DONE,
 ]
 
+STAGE_CONTRACTS: dict[TaskStage, str] = {
+    TaskStage.PLANNING: (
+        "Вход: код или описание задачи для рефакторинга.\n"
+        "Задача: проанализировать код, декомпозировать на конкретные шаги, "
+        "сформулировать критерии готовности.\n"
+        "Выход: нумерованный список шагов, согласованный с пользователем.\n"
+        "Не начинай реализацию — только план."
+    ),
+    TaskStage.EXECUTION: (
+        "Вход: один шаг из согласованного плана (номер шага = current_step).\n"
+        "Задача: реализовать ровно один шаг — показать код, объяснить решение.\n"
+        "Выход: готовый код для этого шага + краткое объяснение изменений.\n"
+        "Не переходи к следующему шагу без явного подтверждения пользователя."
+    ),
+    TaskStage.VALIDATION: (
+        "Вход: результат всех шагов выполнения.\n"
+        "Задача: проверить соответствие критериям готовности из planning.\n"
+        "Выход: чеклист ✅/❌ по каждому критерию + edge cases для проверки.\n"
+        "Не считай задачу завершённой, пока пользователь не подтвердил все пункты."
+    ),
+    TaskStage.DONE: (
+        "Задача завершена.\n"
+        "Задача: подвести итог — что было сделано, какие решения приняты, "
+        "что стоит учесть в будущем."
+    ),
+}
+
+STAGE_DEFAULT_ACTIONS: dict[TaskStage, str] = {
+    TaskStage.PLANNING: "декомпозировать код на шаги и согласовать план",
+    TaskStage.EXECUTION: "реализовать текущий шаг из плана",
+    TaskStage.VALIDATION: "проверить результат по критериям из плана",
+    TaskStage.DONE: "подвести итог рефакторинга",
+}
+
 
 @dataclass
 class TaskState:
@@ -27,6 +61,10 @@ class TaskState:
     expected_action: str = ""
     paused_at_stage: TaskStage | None = None
     paused_at_step: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.expected_action:
+            self.expected_action = STAGE_DEFAULT_ACTIONS.get(self.stage, "")
 
     def pause(self) -> None:
         if self.stage == TaskStage.PAUSED:
@@ -50,17 +88,24 @@ class TaskState:
         if idx < len(STAGE_ORDER) - 1:
             self.stage = STAGE_ORDER[idx + 1]
             self.current_step = 0
+            self.expected_action = STAGE_DEFAULT_ACTIONS.get(self.stage, "")
 
     def to_context_string(self) -> str:
         if self.stage == TaskStage.PAUSED:
             lines = [
-                f"Текущий этап задачи: ПАУЗА (возобновить с «{self.paused_at_stage.value}», шаг {self.paused_at_step})"
+                f"Текущий этап задачи: ПАУЗА "
+                f"(возобновить с «{self.paused_at_stage.value}», шаг {self.paused_at_step})"
             ]
+            contract = STAGE_CONTRACTS.get(self.paused_at_stage, "")
         else:
             lines = [
                 f"Текущий этап задачи: {self.stage.value.upper()}",
                 f"Текущий шаг: {self.current_step}",
             ]
+            contract = STAGE_CONTRACTS.get(self.stage, "")
+
+        if contract:
+            lines.append(f"Контракт этапа:\n{contract}")
         if self.expected_action:
             lines.append(f"Ожидаемое действие: {self.expected_action}")
         return "\n".join(lines)
@@ -79,10 +124,11 @@ class TaskState:
     @classmethod
     def from_state(cls, data: dict) -> "TaskState":
         raw = data.get("paused_at_stage")
-        return cls(
-            stage=TaskStage(data.get("stage", "planning")),
-            current_step=data.get("current_step", 0),
-            expected_action=data.get("expected_action", ""),
-            paused_at_stage=TaskStage(raw) if raw else None,
-            paused_at_step=data.get("paused_at_step", 0),
-        )
+        # Pass expected_action explicitly so __post_init__ doesn't overwrite it
+        obj = cls.__new__(cls)
+        obj.stage = TaskStage(data.get("stage", "planning"))
+        obj.current_step = data.get("current_step", 0)
+        obj.expected_action = data.get("expected_action", "")
+        obj.paused_at_stage = TaskStage(raw) if raw else None
+        obj.paused_at_step = data.get("paused_at_step", 0)
+        return obj
