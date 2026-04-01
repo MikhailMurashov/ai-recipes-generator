@@ -658,6 +658,18 @@ def main():
         page_icon="🍳",
         layout="wide",
     )
+    st.markdown(
+        """
+        <style>
+        /* Memory buttons: fixed width, don't scale with window */
+        [data-testid="stChatMessageContent"] [data-testid="stColumn"]:has([data-testid="stHorizontalBlock"]) {
+            max-width: 100px !important;
+            flex: 0 0 100px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if not st.session_state.get("current_user"):
         render_login_screen()
