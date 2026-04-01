@@ -4,10 +4,15 @@ import logging
 import streamlit as st
 from agent import Agent
 from config import MODELS
+from memory import LongTermMemory, Personalization
 from storage import (
     delete_context,
+    get_personalization_path,
+    get_user_dir,
     list_contexts,
+    list_users,
     new_session_id,
+    register_user,
     save_context,
     save_working_memory,
 )
@@ -16,9 +21,87 @@ from strategies import SlidingWindowSummaryStrategy, StrategyType
 logging.basicConfig(level=logging.INFO)
 
 
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+
+def render_login_screen():
+    st.title("Добро пожаловать")
+    st.write("Войдите или зарегистрируйтесь, чтобы начать.")
+
+    existing_users = list_users()
+
+    if existing_users:
+        selected = st.selectbox(
+            "Войти как:",
+            options=existing_users,
+            index=None,
+            placeholder="— выберите пользователя —",
+            key="login_selectbox",
+        )
+        if st.button("Войти", use_container_width=True, type="primary"):
+            if not selected:
+                st.error("Выберите пользователя из списка")
+            else:
+                st.session_state["current_user"] = selected
+                st.rerun()
+
+        st.divider()
+
+    new_username = st.text_input(
+        "Новое имя пользователя", max_chars=50, key="login_username_input"
+    )
+    if st.button("Зарегистрироваться", use_container_width=True):
+        name = new_username.strip()
+        if not name:
+            st.error("Введите имя пользователя")
+        elif not register_user(name):
+            st.error(f"Имя «{name}» уже занято. Попробуйте другое.")
+        else:
+            st.session_state["current_user"] = name
+            st.rerun()
+
+
+def handle_logout():
+    agent = st.session_state.get("agent")
+    username = st.session_state.get("current_user")
+    if agent and username and st.session_state.get("session_id"):
+        save_context(
+            st.session_state.session_id,
+            st.session_state.get("system_prompt", ""),
+            agent.history,
+            st.session_state.get("message_stats", []),
+            username=username,
+            model_key=st.session_state.get("selected_model_key"),
+            summary=agent.summary,
+            summarized_count=getattr(agent._strategy, "_summarized_count", 0),
+            strategy_type=agent.strategy_type.value,
+            strategy_state=agent.get_strategy_state(),
+            working_memory=agent.working_memory.to_state(),
+        )
+    st.session_state.clear()
+    st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Session init
+# ---------------------------------------------------------------------------
+
+
+def _make_ltm(username: str) -> LongTermMemory:
+    return LongTermMemory(path=get_user_dir(username) / "long_term_memory.json")
+
+
+def _make_personalization(username: str) -> Personalization:
+    return Personalization(path=get_personalization_path(username))
+
+
 def init_session_state():
+    username = st.session_state["current_user"]
+
     if "session_id" not in st.session_state:
-        contexts = list_contexts()
+        contexts = list_contexts(username)
         if contexts:
             ctx = contexts[0]
             st.session_state.session_id = ctx["session_id"]
@@ -31,11 +114,15 @@ def init_session_state():
                 "summarized_count": ctx.get("summarized_count", 0),
                 "history": ctx.get("history", []),
             }
+            ltm = _make_ltm(username)
+            pers = _make_personalization(username)
             agent = Agent(
                 system_prompt=st.session_state.system_prompt,
                 strategy_type=StrategyType(strategy_type),
                 strategy_state=strategy_state,
                 working_memory_state=ctx.get("working_memory", {}),
+                long_term_memory=ltm,
+                personalization=pers,
             )
             st.session_state.agent = agent
             st.session_state.message_stats = ctx.get("message_stats", [])
@@ -46,16 +133,32 @@ def init_session_state():
         else:
             st.session_state.session_id = new_session_id()
             st.session_state.system_prompt = ""
-            st.session_state.agent = Agent()
+            st.session_state.agent = Agent(
+                long_term_memory=_make_ltm(username),
+                personalization=_make_personalization(username),
+            )
             st.session_state.message_stats = []
+
     if "agent" not in st.session_state:
         st.session_state.agent = Agent(
-            system_prompt=st.session_state.get("system_prompt", "")
+            system_prompt=st.session_state.get("system_prompt", ""),
+            long_term_memory=_make_ltm(username),
+            personalization=_make_personalization(username),
         )
+    # If personalization is empty, pre-fill with username
+    pers = st.session_state.agent.personalization
+    if not pers.text:
+        pers.set_text(f"имя пользователя: {username}")
+
     if "system_prompt" not in st.session_state:
         st.session_state.system_prompt = ""
     if "message_stats" not in st.session_state:
         st.session_state.message_stats = []
+
+
+# ---------------------------------------------------------------------------
+# Branch panel
+# ---------------------------------------------------------------------------
 
 
 def render_branch_panel(agent: Agent):
@@ -104,9 +207,23 @@ def render_branch_panel(agent: Agent):
         st.caption("Активная ветка: Ствол")
 
 
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+
 def render_sidebar() -> tuple[dict, str]:
+    username = st.session_state["current_user"]
+
     with st.sidebar:
-        st.title("Параметры модели")
+        # User info + logout
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(f"👤 **{username}**")
+        with col2:
+            if st.button("Выйти", key="logout_btn", use_container_width=True):
+                handle_logout()
+                return {}, ""
 
         agent = st.session_state.agent
         n = len(agent.history)
@@ -129,6 +246,23 @@ def render_sidebar() -> tuple[dict, str]:
             height=120,
             label_visibility="collapsed",
         )
+
+        # ------------------------------------------------------------------
+        # Personalization panel
+        # ------------------------------------------------------------------
+        st.divider()
+        with st.expander("🪪 Персонализация", expanded=False):
+            st.caption("Информация о вас, которую агент всегда учитывает.")
+            new_text = st.text_area(
+                label="personalization_text",
+                value=agent.personalization.text,
+                height=150,
+                label_visibility="collapsed",
+                placeholder="Например: меня зовут Михаил, я разработчик, предпочитаю краткие ответы",
+                key="personalization_text",
+            )
+            if new_text != agent.personalization.text:
+                agent.personalization.set_text(new_text)
 
         # ------------------------------------------------------------------
         # Memory panel
@@ -175,7 +309,7 @@ def render_sidebar() -> tuple[dict, str]:
             st.divider()
 
             # Долговременная
-            st.markdown("**Долговременная** (профиль, знания)")
+            st.markdown("**Долговременная** (знания)")
             if ltm_entries:
                 for entry in ltm_entries.values():
                     st.caption(
@@ -311,7 +445,7 @@ def render_sidebar() -> tuple[dict, str]:
         st.divider()
 
         if n > 0:
-            contexts = list_contexts()
+            contexts = list_contexts(username)
             ctx_map = {c["session_id"]: c for c in contexts}
             ctx = ctx_map.get(st.session_state.session_id)
             if ctx:
@@ -327,15 +461,23 @@ def render_sidebar() -> tuple[dict, str]:
             st.caption("Новый чат")
 
         if st.button("Сбросить контекст", type="secondary", use_container_width=True):
-            delete_context(st.session_state.session_id)
+            delete_context(st.session_state.session_id, username)
             st.session_state.session_id = new_session_id()
-            new_agent = Agent(system_prompt=st.session_state.system_prompt)
-            new_agent.long_term_memory = agent.long_term_memory
+            new_agent = Agent(
+                system_prompt=st.session_state.system_prompt,
+                long_term_memory=agent.long_term_memory,
+                personalization=agent.personalization,
+            )
             st.session_state.agent = new_agent
             st.session_state.message_stats = []
             st.rerun()
 
     return params, selected_model
+
+
+# ---------------------------------------------------------------------------
+# Chat rendering
+# ---------------------------------------------------------------------------
 
 
 def _stats_caption(
@@ -368,6 +510,7 @@ def _render_msg(
     agent: Agent | None = None,
 ) -> int:
     """Render a single chat message. Returns updated assistant_idx."""
+    username = st.session_state.get("current_user")
     content = msg["content"]
     key_suffix = hashlib.md5(content.encode()).hexdigest()[:8]
 
@@ -404,6 +547,7 @@ def _render_msg(
                         save_working_memory(
                             st.session_state.session_id,
                             agent.working_memory.to_state(),
+                            username=username,
                         )
                         st.toast("Сохранено в рабочую память")
                         st.session_state["mem_panel_open"] = True
@@ -480,6 +624,7 @@ def render_chat_history():
 
 
 def handle_input(params: dict, model: str):
+    username = st.session_state["current_user"]
     user_input = st.chat_input("Введите сообщение...")
     if not user_input:
         return
@@ -527,6 +672,7 @@ def handle_input(params: dict, model: str):
             st.session_state.system_prompt,
             agent.history,
             st.session_state.message_stats,
+            username=username,
             model_key=st.session_state.get("selected_model_key"),
             summary=agent.summary,
             summarized_count=getattr(agent._strategy, "_summarized_count", 0),
@@ -537,12 +683,34 @@ def handle_input(params: dict, model: str):
     st.rerun()
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
 def main():
     st.set_page_config(
         page_title="Чат с ассистентом",
         page_icon="🍳",
         layout="wide",
     )
+    st.markdown(
+        """
+        <style>
+        /* Memory buttons: fixed width, don't scale with window */
+        [data-testid="stChatMessageContent"] [data-testid="stColumn"]:has([data-testid="stHorizontalBlock"]) {
+            max-width: 100px !important;
+            flex: 0 0 100px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not st.session_state.get("current_user"):
+        render_login_screen()
+        st.stop()
+
     st.title("Чат с ассистентом")
 
     init_session_state()
