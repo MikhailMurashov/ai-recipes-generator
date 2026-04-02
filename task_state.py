@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+ADVANCE_SIGNAL = "[→СЛЕДУЮЩИЙ_ЭТАП]"
+STEP_SIGNAL = "[→СЛЕДУЮЩИЙ_ШАГ]"
+
 
 class TaskStage(str, Enum):
     PLANNING = "planning"
@@ -31,7 +34,8 @@ STAGE_CONTRACTS: dict[TaskStage, str] = {
         "Вход: один шаг из согласованного плана (номер шага = current_step).\n"
         "Задача: реализовать ровно один шаг — показать код, объяснить решение.\n"
         "Выход: готовый код для этого шага + краткое объяснение изменений.\n"
-        "Не переходи к следующему шагу без явного подтверждения пользователя."
+        "Когда шаг реализован — добавь в конец ответа: [→СЛЕДУЮЩИЙ_ШАГ]\n"
+        "Когда все шаги выполнены — добавь в конец ответа: [→СЛЕДУЮЩИЙ_ЭТАП]"
     ),
     TaskStage.VALIDATION: (
         "Вход: результат всех шагов выполнения.\n"
@@ -46,6 +50,13 @@ STAGE_CONTRACTS: dict[TaskStage, str] = {
     ),
 }
 
+STAGE_EXPECTED_ACTIONS: dict[TaskStage, str] = {
+    TaskStage.PLANNING: "Составь нумерованный план шагов и критерии готовности",
+    TaskStage.EXECUTION: "Реализуй текущий шаг из согласованного плана",
+    TaskStage.VALIDATION: "Проверь каждый критерий готовности (✅/❌) и перечисли edge cases",
+    TaskStage.DONE: "Подведи краткий итог: что сделано, какие решения приняты",
+}
+
 
 @dataclass
 class TaskState:
@@ -53,6 +64,30 @@ class TaskState:
     current_step: int = 0
     paused_at_stage: TaskStage | None = None
     paused_at_step: int = 0
+
+    @property
+    def expected_action(self) -> str:
+        if self.stage == TaskStage.PAUSED:
+            base = STAGE_EXPECTED_ACTIONS.get(self.paused_at_stage, "")
+            return f"(на паузе) {base}"
+        if self.stage == TaskStage.EXECUTION and self.current_step > 0:
+            return f"Реализуй шаг {self.current_step} из согласованного плана"
+        return STAGE_EXPECTED_ACTIONS.get(self.stage, "")
+
+    def check_and_advance(self, text: str) -> bool:
+        if ADVANCE_SIGNAL in text and self.stage not in (
+            TaskStage.PAUSED,
+            TaskStage.DONE,
+        ):
+            self.advance()
+            return True
+        return False
+
+    def check_and_step(self, text: str) -> bool:
+        if STEP_SIGNAL in text and self.stage == TaskStage.EXECUTION:
+            self.current_step += 1
+            return True
+        return False
 
     def pause(self) -> None:
         if self.stage == TaskStage.PAUSED:
@@ -88,11 +123,20 @@ class TaskState:
             lines = [
                 f"Текущий этап задачи: {self.stage.value.upper()}",
                 f"Текущий шаг: {self.current_step}",
+                f"Ожидаемое действие: {self.expected_action}",
             ]
             contract = STAGE_CONTRACTS.get(self.stage, "")
 
         if contract:
             lines.append(f"Контракт этапа:\n{contract}")
+
+        if self.stage not in (TaskStage.PAUSED, TaskStage.DONE):
+            lines.append(
+                f"Сигналы перехода (добавь в конец ответа при завершении):\n"
+                f"  {ADVANCE_SIGNAL} — завершить текущий этап и перейти к следующему\n"
+                f"  {STEP_SIGNAL} — завершить текущий шаг (только в EXECUTION)"
+            )
+
         return "\n".join(lines)
 
     def to_state(self) -> dict:

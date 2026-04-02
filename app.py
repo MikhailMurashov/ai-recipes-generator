@@ -17,6 +17,7 @@ from storage import (
     save_working_memory,
 )
 from strategies import SlidingWindowSummaryStrategy, StrategyType
+from task_state import ADVANCE_SIGNAL, STEP_SIGNAL, TaskStage
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -201,6 +202,8 @@ def render_task_panel(agent: Agent) -> None:
         st.warning(
             f"Пауза — возобновить с «{ts.paused_at_stage.value}», шаг {ts.paused_at_step}"
         )
+    else:
+        st.info(f"Ожидаемое действие: {ts.expected_action}")
 
     st.divider()
 
@@ -731,9 +734,13 @@ def render_chat_history():
 
 def handle_input(params: dict, model: str):
     username = st.session_state["current_user"]
-    user_input = st.chat_input("Введите сообщение...")
-    if not user_input:
-        return
+    auto_trigger = st.session_state.pop("fsm_auto_trigger", None)
+    if auto_trigger:
+        user_input = auto_trigger
+    else:
+        user_input = st.chat_input("Введите сообщение...")
+        if not user_input:
+            return
 
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -757,7 +764,14 @@ def handle_input(params: dict, model: str):
     with st.chat_message("assistant"):
         with st.spinner("Думаю..."):
             result = agent.run(user_input, model=model, **active_params)
-        st.markdown(result.content)
+        display_content = result.content
+        if agent.task_state is not None:
+            display_content = (
+                display_content.replace(ADVANCE_SIGNAL, "")
+                .replace(STEP_SIGNAL, "")
+                .strip()
+            )
+        st.markdown(display_content)
         delta_prompt = max(0, (result.prompt_tokens or 0) - (prev_prompt or 0))
         delta_total = delta_prompt + (result.completion_tokens or 0)
         stats = {
@@ -773,6 +787,14 @@ def handle_input(params: dict, model: str):
                 result.elapsed_s, delta_prompt, result.completion_tokens, delta_total
             )
         )
+        if agent.task_state is not None:
+            stepped = agent.task_state.check_and_step(result.content)
+            advanced = agent.task_state.check_and_advance(result.content)
+            if stepped or advanced:
+                _save_task_state(agent)
+                ts = agent.task_state
+                if ts.stage not in (TaskStage.PAUSED, TaskStage.DONE):
+                    st.session_state["fsm_auto_trigger"] = ts.expected_action
         save_context(
             st.session_state.session_id,
             st.session_state.system_prompt,
