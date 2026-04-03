@@ -17,7 +17,7 @@ from storage import (
     save_working_memory,
 )
 from strategies import SlidingWindowSummaryStrategy, StrategyType
-from task_state import ADVANCE_SIGNAL, STEP_SIGNAL, TaskStage
+from task_state import ADVANCE_SIGNAL, STEP_SIGNAL
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -191,52 +191,39 @@ def render_task_panel(agent: Agent) -> None:
     cols = st.columns(len(STAGE_ORDER))
     for i, stage in enumerate(STAGE_ORDER):
         with cols[i]:
-            if ts.stage == TaskStage.PAUSED and ts.paused_at_stage == stage:
-                st.markdown(f"**⏸ {stage.value}**")
-            elif ts.stage == stage:
+            if ts.stage == stage:
                 st.markdown(f"**→ {stage.value}**")
             else:
                 st.markdown(stage.value)
 
-    if ts.stage == TaskStage.PAUSED:
-        st.warning(
-            f"Пауза — возобновить с «{ts.paused_at_stage.value}», шаг {ts.paused_at_step}"
-        )
-    else:
-        st.info(f"Ожидаемое действие: {ts.expected_action}")
+    st.info(f"Ожидаемое действие: {ts.expected_action}")
 
     st.divider()
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        if ts.stage != TaskStage.PAUSED:
-            if st.button("Пауза", use_container_width=True, key="task_pause"):
-                ts.pause()
-                _save_task_state(agent)
-                st.rerun()
-        else:
-            if st.button(
-                "Возобновить",
-                use_container_width=True,
-                type="primary",
-                key="task_resume",
-            ):
-                ts.resume()
-                _save_task_state(agent)
-                st.rerun()
-    with c2:
         if st.button(
-            "Следующий шаг",
+            "Следующий этап",
             use_container_width=True,
-            disabled=ts.stage in (TaskStage.PAUSED, TaskStage.DONE),
+            disabled=ts.stage == TaskStage.DONE,
             key="task_advance",
         ):
             ts.advance()
             _save_task_state(agent)
             st.rerun()
-    with c3:
+    with c2:
         if st.button("Сбросить", use_container_width=True, key="task_reset"):
             agent.task_state = TaskState()
+            _save_task_state(agent)
+            st.rerun()
+
+    if ts.stage == TaskStage.VALIDATION:
+        if st.button(
+            "← Вернуть в EXECUTION",
+            use_container_width=True,
+            key="task_go_back",
+        ):
+            agent.task_state.go_back()
             _save_task_state(agent)
             st.rerun()
 
@@ -734,13 +721,9 @@ def render_chat_history():
 
 def handle_input(params: dict, model: str):
     username = st.session_state["current_user"]
-    auto_trigger = st.session_state.pop("fsm_auto_trigger", None)
-    if auto_trigger:
-        user_input = auto_trigger
-    else:
-        user_input = st.chat_input("Введите сообщение...")
-        if not user_input:
-            return
+    user_input = st.chat_input("Введите сообщение...")
+    if not user_input:
+        return
 
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -788,13 +771,11 @@ def handle_input(params: dict, model: str):
             )
         )
         if agent.task_state is not None:
-            stepped = agent.task_state.check_and_step(result.content)
             advanced = agent.task_state.check_and_advance(result.content)
-            if stepped or advanced:
+            stepped = False if advanced else agent.task_state.check_and_step(result.content)
+            if advanced or stepped:
                 _save_task_state(agent)
-                ts = agent.task_state
-                if ts.stage not in (TaskStage.PAUSED, TaskStage.DONE):
-                    st.session_state["fsm_auto_trigger"] = ts.expected_action
+
         save_context(
             st.session_state.session_id,
             st.session_state.system_prompt,
@@ -809,6 +790,7 @@ def handle_input(params: dict, model: str):
             working_memory=agent.working_memory.to_state(),
             task_state=agent.task_state.to_state() if agent.task_state else None,
         )
+
     st.rerun()
 
 
