@@ -17,7 +17,7 @@ from storage import (
     save_working_memory,
 )
 from strategies import SlidingWindowSummaryStrategy, StrategyType
-from task_state import ADVANCE_SIGNAL, STEP_SIGNAL
+
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -196,10 +196,6 @@ def render_task_panel(agent: Agent) -> None:
             else:
                 st.markdown(stage.value)
 
-    st.info(f"Ожидаемое действие: {ts.expected_action}")
-
-    st.divider()
-
     c1, c2 = st.columns(2)
     with c1:
         if st.button(
@@ -227,7 +223,6 @@ def render_task_panel(agent: Agent) -> None:
             _save_task_state(agent)
             st.rerun()
 
-    st.divider()
     if st.button("Удалить FSM", use_container_width=True, key="task_delete"):
         agent.task_state = None
         _save_task_state(agent)
@@ -748,12 +743,6 @@ def handle_input(params: dict, model: str):
         with st.spinner("Думаю..."):
             result = agent.run(user_input, model=model, **active_params)
         display_content = result.content
-        if agent.task_state is not None:
-            display_content = (
-                display_content.replace(ADVANCE_SIGNAL, "")
-                .replace(STEP_SIGNAL, "")
-                .strip()
-            )
         st.markdown(display_content)
         delta_prompt = max(0, (result.prompt_tokens or 0) - (prev_prompt or 0))
         delta_total = delta_prompt + (result.completion_tokens or 0)
@@ -770,12 +759,6 @@ def handle_input(params: dict, model: str):
                 result.elapsed_s, delta_prompt, result.completion_tokens, delta_total
             )
         )
-        if agent.task_state is not None:
-            advanced = agent.task_state.check_and_advance(result.content)
-            stepped = False if advanced else agent.task_state.check_and_step(result.content)
-            if advanced or stepped:
-                _save_task_state(agent)
-
         save_context(
             st.session_state.session_id,
             st.session_state.system_prompt,
@@ -817,6 +800,8 @@ def main():
         """,
         unsafe_allow_html=True,
     )
+
+    st.session_state["current_user"] = 'Михаил'
 
     if not st.session_state.get("current_user"):
         render_login_screen()
