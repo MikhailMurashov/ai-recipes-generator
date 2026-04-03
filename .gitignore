@@ -212,3 +212,7 @@ __marimo__/
 # Anthropic
 .claude/
 CLAUDE.md
+
+# Qwen
+.qwen/
+QWEN.md

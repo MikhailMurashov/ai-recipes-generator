@@ -81,6 +81,7 @@ def save_context(
     strategy_type: str = "sliding_window_summary",
     strategy_state: dict | None = None,
     working_memory: dict | None = None,
+    task_state: dict | None = None,
 ):
     path = get_user_dir(username) / f"{session_id}.json"
     now = datetime.now().isoformat(timespec="seconds")
@@ -104,6 +105,7 @@ def save_context(
         "strategy_type": strategy_type,
         "strategy_state": strategy_state,
         "working_memory": working_memory or {},
+        "task_state": task_state,
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 

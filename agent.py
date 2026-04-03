@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 from memory import LongTermMemory, Personalization, WorkingMemory
+from task_state import TaskState
 from strategies import (
     BaseStrategy,
     BranchingStrategy,
@@ -23,6 +24,7 @@ class Agent:
         strategy_type: StrategyType = StrategyType.SLIDING_WINDOW_SUMMARY,
         strategy_state: dict | None = None,
         working_memory_state: dict | None = None,
+        task_state_data: dict | None = None,
         long_term_memory: LongTermMemory | None = None,
         personalization: Personalization | None = None,
     ) -> None:
@@ -44,6 +46,9 @@ class Agent:
         )
         if working_memory_state:
             self.working_memory.from_state(working_memory_state)
+        self.task_state: TaskState | None = None
+        if task_state_data is not None:
+            self.task_state = TaskState.from_state(task_state_data)
         logger.info(
             "agent: init strategy=%s restored=%s",
             strategy_type.value,
@@ -64,6 +69,10 @@ class Agent:
         wm = self.working_memory.to_context_string()
         if wm:
             parts.append(f"## Рабочая память (текущая задача):\n{wm}")
+        if self.task_state is not None:
+            parts.append(
+                f"## Состояние задачи (FSM):\n{self.task_state.to_context_string()}"
+            )
         ltm = self.long_term_memory.to_context_string()
         if ltm:
             parts.append(f"## Долговременная память:\n{ltm}")
